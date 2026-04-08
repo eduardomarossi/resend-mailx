@@ -1,0 +1,163 @@
+#!/usr/bin/python3
+#!/usr/bin/env python3
+"""
+resend-mailx: Emula o comando mailx do Linux usando o resend-cli para envio de emails.
+"""
+
+import argparse
+import subprocess
+import sys
+import os
+from typing import Optional
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="resend-mailx",
+        description="Emula o mailx usando o resend-cli.",
+        add_help=False,
+    )
+
+    # Destinatários no argumento posicional (igual ao mailx)
+    parser.add_argument("to", nargs="*", help="Destinatários")
+
+    # Opções compatíveis com mailx
+    parser.add_argument("-s", "--subject",  default="", help="Assunto do email")
+    parser.add_argument("-c", "--cc",       action="append", default=[], metavar="CC",   help="Cópia (CC)")
+    parser.add_argument("-b", "--bcc",      action="append", default=[], metavar="BCC",  help="Cópia oculta (BCC)")
+    parser.add_argument("-r", "--from",     dest="from_addr", default=None,              help="Endereço do remetente")
+    parser.add_argument("-a", "--attach",   action="append", default=[], metavar="FILE", help="Anexo(s)")
+    parser.add_argument("-v", "--verbose",  action="store_true",                         help="Modo verboso")
+
+    # Ignorados silenciosamente (existem no mailx mas não se aplicam aqui)
+    parser.add_argument("-i", action="store_true",  help=argparse.SUPPRESS)  # ignora linhas com só '.'
+    parser.add_argument("-n", action="store_true",  help=argparse.SUPPRESS)  # não lê /etc/mail.rc
+    parser.add_argument("-N", action="store_true",  help=argparse.SUPPRESS)  # não imprime cabeçalhos
+
+    # -? / --help manual
+    parser.add_argument("-?", "-h", "--help", action="store_true", dest="show_help", help="Mostra ajuda")
+
+    return parser.parse_args()
+
+
+def show_help():
+    help_text = """
+Uso: resend-mailx [-s assunto] [-c cc] [-b bcc] [-r remetente]
+                  [-a anexo] [-v] endereço...
+
+Opções:
+  -s ASSUNTO    Assunto do email
+  -c CC         Destinatário em cópia (pode repetir)
+  -b BCC        Destinatário em cópia oculta (pode repetir)
+  -r REMETENTE  Endereço do remetente (ex: Nome <email@dominio.com>)
+  -a ARQUIVO    Arquivo a anexar (pode repetir)
+  -v            Modo verboso: exibe o comando resend executado
+  -?/-h         Exibe esta ajuda
+
+O corpo do email é lido da entrada padrão (stdin).
+"""
+    print(help_text.strip())
+
+
+def read_body() -> str:
+    """Lê o corpo do email do stdin."""
+    if sys.stdin.isatty():
+        print("Digite o corpo do email (termine com Ctrl+D):", file=sys.stderr)
+    return sys.stdin.read()
+
+
+def resolve_from(from_addr: Optional[str]) -> str:
+    """Resolve o remetente: argumento -r > variável RESEND_FROM > erro."""
+    if from_addr:
+        return from_addr
+    env_from = os.environ.get("RESEND_FROM")
+    if env_from:
+        return env_from
+    print(
+        "Erro: remetente não informado. Use -r ou defina a variável RESEND_FROM.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def build_resend_command(args, body: str) -> list[str]:
+    """Monta o comando resend send com os parâmetros mapeados."""
+    cmd = ["resend", "emails", "send"]
+
+    # Remetente
+    cmd += ["--from", resolve_from(args.from_addr)]
+
+    # Destinatários (--to pode ser repetido)
+    if not args.to:
+        print("Erro: nenhum destinatário informado.", file=sys.stderr)
+        sys.exit(1)
+    for addr in args.to:
+        cmd += ["--to", addr]
+
+    # Assunto
+    if args.subject:
+        cmd += ["--subject", args.subject]
+    else:
+        cmd += ["--subject", "(sem assunto)"]
+
+    # CC
+    for addr in args.cc:
+        cmd += ["--cc", addr]
+
+    # BCC
+    for addr in args.bcc:
+        cmd += ["--bcc", addr]
+
+    # Anexos
+    for path in args.attach:
+        if not os.path.isfile(path):
+            print(f"Aviso: anexo não encontrado: {path}", file=sys.stderr)
+        cmd += ["--attachment", path]
+
+    # Corpo como texto plano
+    cmd += ["--text", body]
+
+    return cmd
+
+
+def main():
+    args = parse_args()
+
+    if args.show_help:
+        show_help()
+        sys.exit(0)
+
+    body = read_body()
+
+    cmd = build_resend_command(args, body)
+
+    if args.verbose:
+        # Exibe o comando ocultando o conteúdo do corpo para não poluir o terminal
+        display_cmd = []
+        skip_next = False
+        for token in cmd:
+            if skip_next:
+                display_cmd.append("<corpo do email>")
+                skip_next = False
+            else:
+                display_cmd.append(token)
+            if token == "--text":
+                skip_next = True
+        print("Executando:", " ".join(display_cmd), file=sys.stderr)
+
+    try:
+        result = subprocess.run(cmd, check=True)
+        sys.exit(result.returncode)
+    except FileNotFoundError:
+        print(
+            "Erro: 'resend' não encontrado. Instale com: npm install -g resend-cli",
+            file=sys.stderr,
+        )
+        sys.exit(127)
+    except subprocess.CalledProcessError as e:
+        print(f"Erro ao enviar email (código {e.returncode}).", file=sys.stderr)
+        sys.exit(e.returncode)
+
+
+if __name__ == "__main__":
+    main()
