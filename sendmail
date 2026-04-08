@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+resend-sendmail — Emula o sendmail do Linux usando o resend-cli para envio de emails.
+
+Uso (compatível com sendmail):
+    resend-sendmail [opções] [destinatário ...]
+    cat mensagem.txt | resend-sendmail -f remetente@exemplo.com destinatario@exemplo.com
+
+Opções suportadas:
+    -f <endereço>       Endereço do remetente (From)
+    -F <nome>           Nome do remetente
+    -t                  Ler destinatários do cabeçalho To:/Cc:/Bcc: da mensagem
+    -r <endereço>       Alias para -f
+    -s <assunto>        Assunto (não é padrão sendmail, mas útil)
+    -v                  Modo verbose
+    -i                  Ignorar linhas com apenas "." (não encerrar mensagem)
+    -oi                 Alias para -i
+    -- <destinatário>   Destinatários adicionais
+"""
+
+import sys
+import os
+import argparse
+import subprocess
+import email
+from email import policy
+from email.parser import BytesParser, Parser
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Wrapper sendmail → resend-cli",
+        add_help=False,
+        # Ignora erros de argumento desconhecido para manter compatibilidade
+    )
+    parser.add_argument("-f", dest="sender", default=None)
+    parser.add_argument("-r", dest="sender_r", default=None)   # alias de -f
+    parser.add_argument("-F", dest="sender_name", default=None)
+    parser.add_argument("-s", dest="subject", default=None)
+    parser.add_argument("-t", dest="read_recipients", action="store_true")
+    parser.add_argument("-v", dest="verbose", action="store_true")
+    parser.add_argument("-i", dest="ignore_dot", action="store_true")
+    parser.add_argument("-oi", dest="ignore_dot", action="store_true")
+    parser.add_argument("-ba", dest="compat", action="store_true")
+    parser.add_argument("-bs", dest="compat", action="store_true")
+    parser.add_argument("-bp", dest="compat", action="store_true")
+
+    args, remaining = parser.parse_known_args(argv)
+
+    # Destinatários são os argumentos restantes (excluindo flags)
+    recipients = [a for a in remaining if not a.startswith("-")]
+
+    return args, recipients
+
+
+def read_message_stdin(ignore_dot: bool) -> str:
+    """Lê a mensagem do stdin, respeitando o flag -i (ignore_dot)."""
+    lines = []
+    for line in sys.stdin:
+        if not ignore_dot and line.strip() == ".":
+            break
+        lines.append(line)
+    return "".join(lines)
+
+
+def parse_email_message(raw: str):
+    """
+    Tenta interpretar o texto como uma mensagem RFC 2822.
+    Retorna um objeto email.message.Message ou None se não houver cabeçalhos.
+    """
+    msg = Parser(policy=policy.compat32).parsestr(raw)
+    return msg
+
+
+def extract_addresses(header_value: str) -> list[str]:
+    """Extrai endereços de email de um campo de cabeçalho."""
+    if not header_value:
+        return []
+    return [
+        addr.strip()
+        for addr in header_value.replace("\n", "").replace("\r", "").split(",")
+        if addr.strip()
+    ]
+
+
+def build_resend_command(
+    sender: str,
+    recipients: list[str],
+    subject: str,
+    body: str,
+    is_html: bool = False,
+    cc: list[str] | None = None,
+    bcc: list[str] | None = None,
+) -> list[str]:
+    """
+    Constrói o comando `resend` com os parâmetros equivalentes.
+
+    resend send \
+        --from   "remetente" \
+        --to     "dest1,dest2" \
+        --subject "assunto" \
+        --text   "corpo"      (ou --html)
+    """
+    cmd = ["resend", "emails", "send"]
+
+    cmd += ["--from", sender]
+
+    cmd += ["--to", ",".join(recipients)]
+
+    if cc:
+        cmd += ["--cc", ",".join(cc)]
+
+    if bcc:
+        cmd += ["--bcc", ",".join(bcc)]
+
+    cmd += ["--subject", subject or "(sem assunto)"]
+
+    if is_html:
+        cmd += ["--html", body]
+    else:
+        cmd += ["--text", body]
+
+    return cmd
+
+
+def main():
+    args, cli_recipients = parse_args(sys.argv[1:])
+
+    # Lê mensagem do stdin
+    raw_message = read_message_stdin(args.ignore_dot)
+
+    if not raw_message.strip():
+        print("resend-sendmail: nenhuma mensagem recebida no stdin.", file=sys.stderr)
+        sys.exit(1)
+
+    msg = parse_email_message(raw_message)
+
+    # ── Remetente ─────────────────────────────────────────────────────────────
+    sender = args.sender or args.sender_r or os.environ.get("EMAIL") or ""
+
+    if msg["From"] and not sender:
+        sender = msg["From"]
+
+    if args.sender_name and sender and "<" not in sender:
+        sender = f"{args.sender_name} <{sender}>"
+
+    if not sender:
+        print(
+            "resend-sendmail: remetente não especificado. Use -f ou defina $EMAIL.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ── Destinatários ─────────────────────────────────────────────────────────
+    recipients: list[str] = list(cli_recipients)
+
+    if args.read_recipients or not recipients:
+        recipients += extract_addresses(msg.get("To", ""))
+        recipients += extract_addresses(msg.get("Cc", ""))
+        # Bcc é consumido aqui e NÃO repassado como cabeçalho
+        bcc_list = extract_addresses(msg.get("Bcc", ""))
+    else:
+        bcc_list = []
+
+    cc_list = extract_addresses(msg.get("Cc", "")) if args.read_recipients else []
+
+    # Remove duplicatas mantendo a ordem
+    seen: set[str] = set()
+    unique_recipients = []
+    for r in recipients:
+        if r not in seen:
+            seen.add(r)
+            unique_recipients.append(r)
+    recipients = unique_recipients
+
+    if not recipients:
+        print("resend-sendmail: nenhum destinatário encontrado.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Assunto ───────────────────────────────────────────────────────────────
+    subject = args.subject or msg.get("Subject", "")
+
+    # ── Corpo ─────────────────────────────────────────────────────────────────
+    is_html = False
+    body = ""
+
+    if msg.get_content_maintype() == "multipart":
+        # Mensagem MIME multipart: prefere text/html, cai em text/plain
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/html":
+                body = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", errors="replace"
+                )
+                is_html = True
+                break
+            elif ct == "text/plain" and not body:
+                body = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", errors="replace"
+                )
+    elif msg.get_content_type() == "text/html":
+        is_html = True
+        payload = msg.get_payload(decode=True)
+        body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace") if payload else msg.get_payload()
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+        else:
+            # Mensagem simples sem cabeçalhos MIME — usa o texto bruto
+            body = raw_message
+
+    # ── Monta e executa o comando resend ──────────────────────────────────────
+    cmd = build_resend_command(
+        sender=sender,
+        recipients=recipients,
+        subject=subject,
+        body=body,
+        is_html=is_html,
+        cc=cc_list or None,
+        bcc=bcc_list or None,
+    )
+
+    if args.verbose:
+        print(f"[resend-sendmail] Comando: {' '.join(cmd)}", file=sys.stderr)
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=not args.verbose)
+        if args.verbose and result.stdout:
+            print(result.stdout.decode(), file=sys.stderr)
+    except FileNotFoundError:
+        print(
+            "resend-sendmail: 'resend' não encontrado. Instale o resend-cli: npm install -g resend",
+            file=sys.stderr,
+        )
+        sys.exit(127)
+    except subprocess.CalledProcessError as e:
+        stderr_out = e.stderr.decode() if e.stderr else ""
+        print(f"resend-sendmail: erro ao enviar email.\n{stderr_out}", file=sys.stderr)
+        sys.exit(e.returncode)
+
+
+if __name__ == "__main__":
+    main()
