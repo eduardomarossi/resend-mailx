@@ -38,7 +38,7 @@ def parse_args(argv):
     parser.add_argument("-F", dest="sender_name", default=None)
     parser.add_argument("-s", dest="subject", default=None)
     parser.add_argument("-t", dest="read_recipients", action="store_true")
-    parser.add_argument("-v", dest="verbose", action="store_true")
+    parser.add_argument("-v", dest="verbose", action="store_true", default=True)
     parser.add_argument("-i", dest="ignore_dot", action="store_true")
     parser.add_argument("-oi", dest="ignore_dot", action="store_true")
     parser.add_argument("-ba", dest="compat", action="store_true")
@@ -136,7 +136,7 @@ def main():
     msg = parse_email_message(raw_message)
 
     # ── Remetente ─────────────────────────────────────────────────────────────
-    sender = args.sender or args.sender_r or os.environ.get("EMAIL") or ""
+    sender = args.sender or args.sender_r or os.environ.get("RESEND_FROM") or ""
 
     if msg["From"] and not sender:
         sender = msg["From"]
