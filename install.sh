@@ -1,2 +1,4 @@
 #!/bin/bash
-ln -s mailx /usr/bin/mail
+ln -s $(pwd):/mailx /usr/bin/mail
+chmod +x /usr/bin/mail
+chmod +x $(pwd):/mailx
