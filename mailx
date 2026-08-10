@@ -8,6 +8,7 @@ import argparse
 import subprocess
 import sys
 import os
+import urllib.request
 from typing import Optional
 
 
@@ -128,7 +129,21 @@ def main():
         sys.exit(0)
 
     body = read_body()
+    
+    send_ping = os.environ.get('RESEND_PING_URL')
+    send_ping_subject_filter = os.environ.get('RESEND_SUBJECT_PING')
+    send_ping_only_if_match = os.environ.get('RESEND_PING_ONLY_MATCH')
+    pinged = False
 
+    if args.subject is not None and send_ping_subject_filter in args.subject and send_ping is not None:
+       with urllib.request.urlopen(send_ping) as response:
+          status_code = response.status
+          print(status_code)
+       pinged = True
+    
+    if pinged and send_ping_only_if_match is not None and int(send_ping_only_if_match) == 1:
+       sys.exit(0)
+          
     cmd = build_resend_command(args, body)
 
     if args.verbose:
