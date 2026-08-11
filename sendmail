@@ -191,7 +191,7 @@ def main():
     import re 
     if send_ping_subject_filter is not None:
        pattern = re.compile(send_ping_subject_filter)
-       if args.subject is not None and pattern.match(args.subject) and send_ping is not None:
+       if args.subject is not None and pattern.search(args.subject) and send_ping is not None:
           with urllib.request.urlopen(send_ping) as response:
              status_code = response.status
              print(status_code)
